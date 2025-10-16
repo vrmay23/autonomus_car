@@ -1,10 +1,11 @@
 /**
  * AUTHOR: VINICIUS RODRIGO MAY & CLARICE MOURA SANTOS
  * DATE: 2025-10-16
- * 
+*/
+
+/**
  * CONTROLE DE CARRINHO AUTÔNOMO - ESP32-C3 DevKitM-1
- * Versão refatorada com controle individual de motores
- * PADRÃO: TUDO DESLIGADO
+ * Versão refatorada com MIDDLEWARE (Control Hub Task) para resolver concorrência.
  */
 
 /**
@@ -22,6 +23,7 @@
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h" // Adicionado para o Middleware
 #include "driver/ledc.h"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -116,21 +118,55 @@ typedef enum {
     MOTOR_BACKWARD
 } motor_direction_t;
 
+// ====================================================================
+//                          ESTRUTURA MIDDLEWARE (COMANDO)
+// ====================================================================
+
+#define COMMAND_QUEUE_LENGTH    10 // Aumentado para 10
+
+typedef enum {
+    CMD_NONE,
+    CMD_MOTOR,
+    CMD_SYNC,
+    CMD_SWEEP_START,
+    CMD_SWEEP_STOP,
+    CMD_ANGLE_MANUAL,
+    CMD_CALIBRATION
+} control_command_t;
+
+typedef struct {
+    control_command_t type;
+    union {
+        struct {
+            motor_axis_t axis;
+            motor_direction_t direction;
+            int speed;
+        } motor;
+        struct {
+            int value; // speed para SWEEP, angle para MANUAL
+        } value;
+        motor_axis_t calib_axis;
+    } payload;
+} control_message_t;
+
 /**
  * GLOBAL VARIABLES
+ * Variáveis de estado agora controladas/escritas SOMENTE pela control_hub_task
  */
 static const char *TAG = "[GODAR]";
 static int current_angle = ANGLE_CENTER;
 static int angle_target = ANGLE_CENTER;
 static TaskHandle_t sweep_task_handle = NULL;
 static int sweep_delay_ms = 10;
+static QueueHandle_t control_queue; // Handle da Queue de Mensagens
 
 /**
- * FORWARD DECLARATIONS
+ * FORWARD DECLARATIONS (Atualizadas)
  */
 void servo_set_angle(int angle);
 void sweep_test_task(void *pvParameters);
-void car_control_task(void *pvParameters);
+void control_hub_task(void *pvParameters); // Nova Task (Middleware)
+// car_control_task removida
 void servo_init(void);
 void motor_gpio_init(void);
 void motor_control(motor_axis_t axis, motor_direction_t direction, int speed);
@@ -145,9 +181,10 @@ void process_command(char *cmd_str);
 
 /**
  * ============================================================
- * SERVO FUNCTIONS
+ * SERVO FUNCTIONS (Mantidas, agora chamadas pelo HUB)
  * ============================================================
  */
+// ... (angle_to_duty permanece inalterada)
 uint32_t angle_to_duty(int angle)
 {
     if (angle < ANGLE_MIN) angle = ANGLE_MIN;
@@ -162,6 +199,8 @@ uint32_t angle_to_duty(int angle)
 
 void servo_set_angle(int angle)
 {
+    // Apenas a control_hub_task e a sweep_test_task (quando rodando)
+    // chamam esta função, eliminando a necessidade de Critical Section AQUI.
     if (angle < ANGLE_MIN || angle > ANGLE_MAX) {
         ESP_LOGW(TAG, "Ângulo fora do range: %d", angle);
         return;
@@ -174,6 +213,7 @@ void servo_set_angle(int angle)
 
 void servo_init(void)
 {
+    // ... (servo_init permanece inalterada)
     gpio_reset_pin(GPIO_SERVO_DIRECTION);
     gpio_set_direction(GPIO_SERVO_DIRECTION, GPIO_MODE_OUTPUT);
     gpio_set_pull_mode(GPIO_SERVO_DIRECTION, GPIO_PULLDOWN_ONLY);
@@ -205,13 +245,13 @@ void servo_init(void)
 
 /**
  * ============================================================
- * MOTOR FUNCTIONS
+ * MOTOR FUNCTIONS (Mantidas, agora chamadas pelo HUB)
  * ============================================================
  */
 
 void motor_gpio_init(void)
 {
-    // CRÍTICO: Primeiro reseta e força LOW ANTES de configurar direção
+    // ... (motor_gpio_init permanece inalterada)
     gpio_reset_pin(GPIO_MOTOR_FRONT_IN1);
     gpio_reset_pin(GPIO_MOTOR_FRONT_IN2);
     gpio_reset_pin(GPIO_MOTOR_REAR_IN3);
@@ -251,7 +291,6 @@ void motor_gpio_init(void)
         .clk_cfg          = LEDC_AUTO_CLK
     };
     ESP_ERROR_CHECK(ledc_timer_config(&motor_timer));
-    ESP_LOGI(TAG, "Motor Timer PWM configurado: 1kHz, 8-bit");
 
     ledc_channel_config_t motor_front_channel = {
         .gpio_num       = GPIO_MOTOR_FRONT_PWM,
@@ -263,7 +302,6 @@ void motor_gpio_init(void)
         .hpoint         = 0
     };
     ESP_ERROR_CHECK(ledc_channel_config(&motor_front_channel));
-    ESP_LOGI(TAG, "Motor FRONT PWM: GPIO %d, Canal %d", GPIO_MOTOR_FRONT_PWM, MOTOR_FRONT_LEDC_CHANNEL);
 
     ledc_channel_config_t motor_rear_channel = {
         .gpio_num       = GPIO_MOTOR_REAR_PWM,
@@ -275,7 +313,6 @@ void motor_gpio_init(void)
         .hpoint         = 0
     };
     ESP_ERROR_CHECK(ledc_channel_config(&motor_rear_channel));
-    ESP_LOGI(TAG, "Motor REAR PWM: GPIO %d, Canal %d", GPIO_MOTOR_REAR_PWM, MOTOR_REAR_LEDC_CHANNEL);
 
     ESP_LOGI(TAG, "Motores inicializados com PWM (Jumpers REMOVIDOS)");
 #else
@@ -288,23 +325,15 @@ void motor_gpio_init(void)
     ESP_LOGI(TAG, "Todos os motores inicializados em estado DESLIGADO");
 }
 
-/**
- * FUNÇÃO PRINCIPAL DE CONTROLE DE MOTOR
- * Controla um motor individual (front ou rear) em uma direção específica com velocidade 1-10
- */
 void motor_control(motor_axis_t axis, motor_direction_t direction, int speed)
 {
-    // Valida velocidade (1-10)
+    // ... (motor_control permanece inalterada, é chamada somente pelo HUB)
     if (speed < MOTOR_SPEED_MIN) speed = MOTOR_SPEED_MIN;
     if (speed > MOTOR_SPEED_MAX) speed = MOTOR_SPEED_MAX;
 
-    // Seleciona limites PWM baseado no eixo
     int pwm_min = (axis == MOTOR_FRONT) ? MOTOR_PWM_MIN_FRONT : MOTOR_PWM_MIN_REAR;
     int pwm_max = (axis == MOTOR_FRONT) ? MOTOR_PWM_MAX_FRONT : MOTOR_PWM_MAX_REAR;
 
-    // Converte velocidade 1-10 para PWM com range ajustado
-    // Speed 1 = pwm_min
-    // Speed 10 = pwm_max
     int pwm_range = pwm_max - pwm_min;
     int pwm_value = pwm_min + ((speed - 1) * pwm_range) / (MOTOR_SPEED_MAX - 1);
 
@@ -313,7 +342,6 @@ void motor_control(motor_axis_t axis, motor_direction_t direction, int speed)
                           (direction == MOTOR_BACKWARD) ? "BACKWARD" : "STOP";
 
     if (axis == MOTOR_FRONT) {
-        // Controla Motor Dianteiro
         if (direction == MOTOR_FORWARD) {
             gpio_set_level(GPIO_MOTOR_FRONT_IN1, 1);
             gpio_set_level(GPIO_MOTOR_FRONT_IN2, 0);
@@ -331,13 +359,11 @@ void motor_control(motor_axis_t axis, motor_direction_t direction, int speed)
         ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_FRONT_LEDC_CHANNEL);
         ESP_LOGI(TAG, "Motor %s: %s - Speed=%d (PWM=%d)", axis_name, dir_name, speed, pwm_value);
 #else
-        // Com jumpers, liga/desliga o enable
         gpio_set_level(GPIO_MOTOR_FRONT_PWM, (direction != MOTOR_STOP) ? 1 : 0);
         ESP_LOGI(TAG, "Motor %s: %s - Velocidade FIXA (jumper)", axis_name, dir_name);
 #endif
 
     } else { // MOTOR_REAR
-        // Controla Motor Traseiro
         if (direction == MOTOR_FORWARD) {
             gpio_set_level(GPIO_MOTOR_REAR_IN3, 1);
             gpio_set_level(GPIO_MOTOR_REAR_IN4, 0);
@@ -355,29 +381,23 @@ void motor_control(motor_axis_t axis, motor_direction_t direction, int speed)
         ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_REAR_LEDC_CHANNEL);
         ESP_LOGI(TAG, "Motor %s: %s - Speed=%d (PWM=%d)", axis_name, dir_name, speed, pwm_value);
 #else
-        // Com jumpers, liga/desliga o enable
         gpio_set_level(GPIO_MOTOR_REAR_PWM, (direction != MOTOR_STOP) ? 1 : 0);
         ESP_LOGI(TAG, "Motor %s: %s - Velocidade FIXA (jumper)", axis_name, dir_name);
 #endif
     }
 }
 
-/**
- * Para TODOS os motores imediatamente
- */
 void motor_stop_all(void)
 {
+    // ... (motor_stop_all permanece inalterada)
     motor_control(MOTOR_FRONT, MOTOR_STOP, 0);
     motor_control(MOTOR_REAR, MOTOR_STOP, 0);
     ESP_LOGI(TAG, "TODOS os motores PARADOS");
 }
 
-/**
- * SINCRONIZA todos os motores com a MESMA velocidade PERCEBIDA
- * O speed é abstraído: FRONT e REAR usam PWM diferentes para mesma velocidade real
- */
 void motor_sync(motor_direction_t direction, int speed)
 {
+    // ... (motor_sync permanece inalterada)
     if (speed < MOTOR_SPEED_MIN) speed = MOTOR_SPEED_MIN;
     if (speed > MOTOR_SPEED_MAX) speed = MOTOR_SPEED_MAX;
     
@@ -387,19 +407,15 @@ void motor_sync(motor_direction_t direction, int speed)
     ESP_LOGI(TAG, "=== SYNC MOTORS ===");
     ESP_LOGI(TAG, "Direção: %s, Speed Abstrato: %d", dir_name, speed);
     
-    // Envia o MESMO speed para ambos
-    // A função motor_control() já aplica a calibração individual
     motor_control(MOTOR_FRONT, direction, speed);
     motor_control(MOTOR_REAR, direction, speed);
     
     ESP_LOGI(TAG, "=== SYNC COMPLETO ===");
 }
 
-/**
- * CALIBRAÇÃO - Mostra tabela de PWM para cada speed
- */
 void motor_calibration(motor_axis_t axis)
 {
+    // ... (motor_calibration permanece inalterada)
     const char *axis_name = (axis == MOTOR_FRONT) ? "FRONT" : "REAR";
     int pwm_min = (axis == MOTOR_FRONT) ? MOTOR_PWM_MIN_FRONT : MOTOR_PWM_MIN_REAR;
     int pwm_max = (axis == MOTOR_FRONT) ? MOTOR_PWM_MAX_FRONT : MOTOR_PWM_MAX_REAR;
@@ -427,12 +443,13 @@ void motor_calibration(motor_axis_t axis)
 
 /**
  * ============================================================
- * SWEEP & SERVO CONTROL
+ * SWEEP & SERVO CONTROL (Refatorado para o HUB)
  * ============================================================
  */
 
 void update_target_angle(int new_angle)
 {
+    // Não precisa de Critical Section, pois SÓ o HUB (ou sweep, se ativo) altera
     if (new_angle < SWEEP_LIMIT_MIN) new_angle = SWEEP_LIMIT_MIN;
     if (new_angle > SWEEP_LIMIT_MAX) new_angle = SWEEP_LIMIT_MAX;
     angle_target = new_angle;
@@ -440,6 +457,7 @@ void update_target_angle(int new_angle)
 
 void set_sweep_speed(int speed)
 {
+    // Não precisa de Critical Section, pois SÓ o HUB a altera
     if (speed < 1) speed = 1;
     if (speed > 10) speed = 10;
     int delay_range = SWEEP_STEP_DELAY_MS_MAX - SWEEP_STEP_DELAY_MS_MIN;
@@ -449,24 +467,29 @@ void set_sweep_speed(int speed)
     ESP_LOGI(TAG, "Velocidade SWEEP: %d (Delay: %dms)", speed, sweep_delay_ms);
 }
 
-void start_sweep_test(int speed)
-{
-    set_sweep_speed(speed);
-    if (sweep_task_handle == NULL) {
-        xTaskCreate(sweep_test_task, "sweep_test_task", 4096, NULL, 6, &sweep_task_handle);
-        ESP_LOGI(TAG, "Sweep Test INICIADO");
-    } else {
-        ESP_LOGW(TAG, "Sweep Test já rodando");
-    }
-}
+// Funções start/stop movidas para dentro do HUB ou chamadas por ele
+// Para evitar concorrência no 'sweep_task_handle', estas funções SÃO CHAMADAS APENAS PELO HUB.
 
 void stop_sweep_test(void)
 {
+    // Chamado EXCLUSIVAMENTE pelo HUB
     if (sweep_task_handle != NULL) {
         vTaskDelete(sweep_task_handle);
         sweep_task_handle = NULL;
-        update_target_angle(ANGLE_CENTER);
+        update_target_angle(ANGLE_CENTER); // Seta alvo para o HUB estabilizar o servo
         ESP_LOGI(TAG, "Sweep Test PARADO - Retornando ao centro");
+    }
+}
+
+void start_sweep_test(int speed)
+{
+    // Chamado EXCLUSIVAMENTE pelo HUB
+    set_sweep_speed(speed);
+    if (sweep_task_handle == NULL) {
+        xTaskCreate(sweep_test_task, "sweep_test_task", 4096, NULL, 5, &sweep_task_handle);
+        ESP_LOGI(TAG, "Sweep Test INICIADO");
+    } else {
+        ESP_LOGW(TAG, "Sweep Test já rodando. Reconfigurando velocidade.");
     }
 }
 
@@ -486,44 +509,112 @@ void sweep_test_task(void *pvParameters)
             vTaskDelay(pdMS_TO_TICKS(500));
         }
         
-        servo_set_angle(next_angle);
-        vTaskDelay(pdMS_TO_TICKS(sweep_delay_ms));
+        servo_set_angle(next_angle); // Atualiza current_angle
+        vTaskDelay(pdMS_TO_TICKS(sweep_delay_ms)); // Usa o delay definido pelo HUB
     }
 }
 
-void car_control_task(void *pvParameters)
+// ====================================================================
+//                       MIDDLEWARE: CONTROL HUB TASK
+// ====================================================================
+
+/**
+ * *************************************************************************
+ * INÍCIO DO MIDDLEWARE: control_hub_task
+ * * Função: Este é o ponto central de controle do carrinho. Ele atua como um
+ * consumidor dos comandos da Queue, garantindo que todas as mudanças de
+ * ESTADO (sweep, angle_target) e chamadas de motor/servo sejam feitas
+ * SEQUENCIALMENTE dentro do contexto desta task.
+ * * Isto ELIMINA todas as race conditions que ocorriam quando a serial_task
+ * (produtor) interferia diretamente na lógica de controle (consumidor).
+ * * A LÓGICA DE RAMPA (antiga car_control_task) foi integrada aqui.
+ * *************************************************************************
+ */
+void control_hub_task(void *pvParameters)
 {
+    control_message_t msg;
     const int step = SWEEP_STEP_DEGREES;
-    const int delay_ms = 10;
-    
-    servo_set_angle(ANGLE_CENTER);
+    const int delay_control = 10; // Frequência da rampa de controle
+
+    // Garante estado inicial do servo
+    servo_set_angle(ANGLE_CENTER); 
     
     while (1) {
-        if (sweep_task_handle == NULL) {
+        // 1. Processa um comando da Queue (prioridade sobre a rampa)
+        if (xQueueReceive(control_queue, &msg, 0) == pdPASS) { 
+            
+            switch (msg.type) {
+                case CMD_MOTOR:
+                    motor_control(msg.payload.motor.axis, msg.payload.motor.direction, msg.payload.motor.speed);
+                    break;
+                    
+                case CMD_SYNC:
+                    motor_sync(msg.payload.motor.direction, msg.payload.motor.speed);
+                    break;
+                    
+                case CMD_SWEEP_START:
+                    stop_sweep_test(); // Para o sweep antigo, se houver
+                    // start_sweep_test manipula o handle de task
+                    start_sweep_test(msg.payload.value.value); 
+                    break;
+                    
+                case CMD_SWEEP_STOP:
+                    stop_sweep_test();
+                    angle_target = ANGLE_CENTER; // Força retorno ao centro
+                    break;
+                    
+                case CMD_ANGLE_MANUAL:
+                    stop_sweep_test(); // Para o sweep se um comando de ângulo manual for enviado
+                    update_target_angle(msg.payload.value.value);
+                    break;
+                    
+                case CMD_CALIBRATION:
+                    motor_calibration(msg.payload.calib_axis);
+                    break;
+
+                default:
+                    // CMD_NONE
+                    break;
+            }
+        }
+        
+        // 2. Lógica de Rampa (Substitui car_control_task)
+        // Só executa se o sweep NÃO estiver ativo.
+        if (sweep_task_handle == NULL) { 
             if (current_angle != angle_target) {
                 int direction = (angle_target > current_angle) ? step : -step;
                 int next_angle = current_angle + direction;
                 
+                // Limita para evitar overshoot
                 if ((direction > 0 && next_angle > angle_target) ||
                     (direction < 0 && next_angle < angle_target))
                 {
                     next_angle = angle_target;
                 }
+                
                 servo_set_angle(next_angle);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        
+        vTaskDelay(pdMS_TO_TICKS(delay_control)); // Frequência do loop
     }
 }
+/**
+ * *************************************************************************
+ * FIM DO MIDDLEWARE: control_hub_task
+ * *************************************************************************
+ */
 
 /**
  * ============================================================
- * SERIAL/UART TASK
+ * SERIAL/UART TASK (PRODUTOR)
  * ============================================================
  */
 
 /**
  * Processa um comando recebido via UART
+ * Esta função agora apenas MONTA a mensagem e ENVIA para a Queue.
+ * A EXECUÇÃO do comando é feita pela control_hub_task.
  */
 void process_command(char *cmd_str)
 {
@@ -532,6 +623,7 @@ void process_command(char *cmd_str)
     temp_buffer[sizeof(temp_buffer) - 1] = '\0';
     
     char *token = strtok(temp_buffer, " ");
+    control_message_t msg = { .type = CMD_NONE }; // Inicia como NONE
     
     // Comando SWEEP
     if (token && strcasecmp(token, "SWEEP") == 0) {
@@ -539,129 +631,110 @@ void process_command(char *cmd_str)
         char *speed_str = strtok(NULL, " ");
         
         if (sub_command && strcasecmp(sub_command, "START") == 0) {
-            int speed = 5;
-            if (speed_str) {
-                speed = (int)strtol(speed_str, NULL, 10);
-            }
-            stop_sweep_test();
-            start_sweep_test(speed);
+            msg.type = CMD_SWEEP_START;
+            msg.payload.value.value = speed_str ? (int)strtol(speed_str, NULL, 10) : 5;
         } else if (sub_command && strcasecmp(sub_command, "STOP") == 0) {
-            stop_sweep_test();
+            msg.type = CMD_SWEEP_STOP;
         } else {
             ESP_LOGW(TAG, "Comando SWEEP inválido");
+            return;
         }
     }
     // Comando MOTOR
     else if (token && strcasecmp(token, "MOTOR") == 0) {
-        char *axis_str = strtok(NULL, " ");      // front/rear/calib
-        char *dir_str = strtok(NULL, " ");       // forward/backward/stop
-        char *speed_str = strtok(NULL, " ");     // 1-10
+        char *axis_str = strtok(NULL, " ");
+        char *dir_str = strtok(NULL, " ");
+        char *speed_str = strtok(NULL, " ");
         
-        // Comando CALIB (Calibração)
-        if (axis_str && strcasecmp(axis_str, "FRONT") == 0 && 
-            dir_str && strcasecmp(dir_str, "CALIB") == 0) {
-            motor_calibration(MOTOR_FRONT);
-        }
-        else if (axis_str && strcasecmp(axis_str, "REAR") == 0 && 
-                 dir_str && strcasecmp(dir_str, "CALIB") == 0) {
-            motor_calibration(MOTOR_REAR);
+        // Comando CALIB
+        if (axis_str && dir_str && strcasecmp(dir_str, "CALIB") == 0) {
+            msg.type = CMD_CALIBRATION;
+            if (strcasecmp(axis_str, "FRONT") == 0) msg.payload.calib_axis = MOTOR_FRONT;
+            else if (strcasecmp(axis_str, "REAR") == 0) msg.payload.calib_axis = MOTOR_REAR;
+            else return;
         }
         // Comando Normal
         else if (axis_str && dir_str) {
-            motor_axis_t axis;
             motor_direction_t direction;
-            int speed = 5; // Default
+            int speed = 5;
             
             // Parse axis
-            if (strcasecmp(axis_str, "FRONT") == 0) {
-                axis = MOTOR_FRONT;
-            } else if (strcasecmp(axis_str, "REAR") == 0) {
-                axis = MOTOR_REAR;
-            } else {
-                ESP_LOGW(TAG, "Eixo inválido: %s (use FRONT ou REAR)", axis_str);
-                return;
-            }
+            if (strcasecmp(axis_str, "FRONT") == 0) msg.payload.motor.axis = MOTOR_FRONT;
+            else if (strcasecmp(axis_str, "REAR") == 0) msg.payload.motor.axis = MOTOR_REAR;
+            else { ESP_LOGW(TAG, "Eixo inválido: %s", axis_str); return; }
             
             // Parse direction
-            if (strcasecmp(dir_str, "FORWARD") == 0) {
-                direction = MOTOR_FORWARD;
-            } else if (strcasecmp(dir_str, "BACKWARD") == 0) {
-                direction = MOTOR_BACKWARD;
-            } else if (strcasecmp(dir_str, "STOP") == 0) {
-                direction = MOTOR_STOP;
-            } else {
-                ESP_LOGW(TAG, "Direção inválida: %s (use FORWARD, BACKWARD ou STOP)", dir_str);
-                return;
-            }
+            if (strcasecmp(dir_str, "FORWARD") == 0) direction = MOTOR_FORWARD;
+            else if (strcasecmp(dir_str, "BACKWARD") == 0) direction = MOTOR_BACKWARD;
+            else if (strcasecmp(dir_str, "STOP") == 0) direction = MOTOR_STOP;
+            else { ESP_LOGW(TAG, "Direção inválida: %s", dir_str); return; }
             
             // Parse speed (optional)
-            if (speed_str && direction != MOTOR_STOP) {
-                speed = (int)strtol(speed_str, NULL, 10);
-            }
+            if (speed_str && direction != MOTOR_STOP) speed = (int)strtol(speed_str, NULL, 10);
             
-            // Executa comando
-            motor_control(axis, direction, speed);
+            msg.type = CMD_MOTOR;
+            msg.payload.motor.direction = direction;
+            msg.payload.motor.speed = speed;
         } else {
-            ESP_LOGW(TAG, "Comando MOTOR inválido. Formato: MOTOR <front|rear> <forward|backward|stop|calib> [1-10]");
+            ESP_LOGW(TAG, "Comando MOTOR incompleto.");
+            return;
         }
     }
-    // Comando SYNC (Sincroniza todos os motores)
+    // Comando SYNC
     else if (token && strcasecmp(token, "SYNC") == 0) {
-        char *dir_str = strtok(NULL, " ");       // forward/backward/stop
-        char *speed_str = strtok(NULL, " ");     // 1-10
+        char *dir_str = strtok(NULL, " ");
+        char *speed_str = strtok(NULL, " ");
         
         if (dir_str) {
             motor_direction_t direction;
-            int speed = 5; // Default
+            int speed = 5;
             
-            // Parse direction
-            if (strcasecmp(dir_str, "FORWARD") == 0) {
-                direction = MOTOR_FORWARD;
-            } else if (strcasecmp(dir_str, "BACKWARD") == 0) {
-                direction = MOTOR_BACKWARD;
-            } else if (strcasecmp(dir_str, "STOP") == 0) {
-                direction = MOTOR_STOP;
-            } else {
-                ESP_LOGW(TAG, "Direção inválida: %s (use FORWARD, BACKWARD ou STOP)", dir_str);
-                return;
-            }
+            if (strcasecmp(dir_str, "FORWARD") == 0) direction = MOTOR_FORWARD;
+            else if (strcasecmp(dir_str, "BACKWARD") == 0) direction = MOTOR_BACKWARD;
+            else if (strcasecmp(dir_str, "STOP") == 0) direction = MOTOR_STOP;
+            else { ESP_LOGW(TAG, "Direção SYNC inválida."); return; }
             
-            // Parse speed (optional)
-            if (speed_str && direction != MOTOR_STOP) {
-                speed = (int)strtol(speed_str, NULL, 10);
-            }
+            if (speed_str && direction != MOTOR_STOP) speed = (int)strtol(speed_str, NULL, 10);
             
-            // Executa sincronização
-            motor_sync(direction, speed);
+            msg.type = CMD_SYNC;
+            msg.payload.motor.direction = direction;
+            msg.payload.motor.speed = speed;
         } else {
-            ESP_LOGW(TAG, "Comando SYNC inválido. Formato: SYNC <forward|backward|stop> [1-10]");
+            ESP_LOGW(TAG, "Comando SYNC incompleto.");
+            return;
         }
     }
     // Ângulo manual
     else {
-        if (sweep_task_handle != NULL) {
-            stop_sweep_test();
-        }
         char *endptr;
         long angle_l = strtol(cmd_str, &endptr, 10);
         int angle = (int)angle_l;
         
         if (*endptr == '\0' || *endptr == ' ' || *endptr == '\t') {
             if (angle >= SWEEP_LIMIT_MIN && angle <= SWEEP_LIMIT_MAX) {
-                ESP_LOGI(TAG, "Ângulo Manual: %d°", angle);
-                update_target_angle(angle);
+                msg.type = CMD_ANGLE_MANUAL;
+                msg.payload.value.value = angle;
             } else {
-                ESP_LOGW(TAG, "Ângulo fora do range (%d a %d): %d", 
-                        SWEEP_LIMIT_MIN, SWEEP_LIMIT_MAX, angle);
+                ESP_LOGW(TAG, "Ângulo fora do range (%d a %d): %d", SWEEP_LIMIT_MIN, SWEEP_LIMIT_MAX, angle);
+                return;
             }
         } else {
             ESP_LOGW(TAG, "Comando inválido: '%s'", cmd_str);
+            return;
+        }
+    }
+
+    // ENVIA o comando para o Hub
+    if (msg.type != CMD_NONE) {
+        if (xQueueSend(control_queue, &msg, pdMS_TO_TICKS(10)) != pdPASS) {
+            ESP_LOGE(TAG, "Queue de controle cheia. Comando descartado.");
         }
     }
 }
 
 void serial_task(void *pvParameters)
 {
+    // ... (serial_task permanece inalterada, apenas chama o refatorado process_command)
     char data_buffer[128];
     int current_pos = 0;
     TickType_t last_char_time = 0;
@@ -671,10 +744,7 @@ void serial_task(void *pvParameters)
                                   pdMS_TO_TICKS(SERIAL_READ_TIMEOUT_MS));
         
         if (len > 0) {
-            // Atualiza timestamp do último caractere recebido
             last_char_time = xTaskGetTickCount();
-            
-            // ECHO: Envia de volta o caractere recebido
             uart_write_bytes(UART_NUM, (const char *)&data_buffer[current_pos], 1);
             
             if (data_buffer[current_pos] == '\n' || data_buffer[current_pos] == '\r') {
@@ -701,14 +771,11 @@ void serial_task(void *pvParameters)
                 }
             }
         } else {
-            // Não recebeu nada neste ciclo
-            // Verifica se há comando pendente no buffer e se passou o timeout
             if (current_pos > 0 && last_char_time > 0) {
                 TickType_t now = xTaskGetTickCount();
                 TickType_t elapsed_ms = (now - last_char_time) * portTICK_PERIOD_MS;
                 
                 if (elapsed_ms >= COMMAND_IDLE_TIMEOUT_MS) {
-                    // Timeout de inatividade! Processa o comando mesmo sem Enter
                     uart_write_bytes(UART_NUM, "\r\n", 2);
                     data_buffer[current_pos] = '\0';
                     
@@ -762,11 +829,17 @@ void app_main(void)
     ESP_ERROR_CHECK(uart_param_config(UART_NUM, &uart_config));
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0));
 
-    // Inicialização: Motores ANTES do Servo (estado seguro)
+    // Inicialização de Hardware
     motor_gpio_init();
-    motor_stop_all();  // GARANTE que tudo está DESLIGADO
-    
+    motor_stop_all();
     servo_init();
+
+    // CRIAÇÃO DA QUEUE DO MIDDLEWARE
+    control_queue = xQueueCreate(COMMAND_QUEUE_LENGTH, sizeof(control_message_t));
+    if (control_queue == NULL) {
+        ESP_LOGE(TAG, "Falha ao criar Queue de Controle!");
+        return;
+    }
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "Comandos disponíveis:");
@@ -778,21 +851,15 @@ void app_main(void)
     ESP_LOGI(TAG, "  MOTOR <front|rear> CALIB");
     ESP_LOGI(TAG, "  SYNC <forward|backward|stop> [1-10]");
     ESP_LOGI(TAG, "  ---");
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "Exemplos:");
-    ESP_LOGI(TAG, "  MOTOR REAR FORWARD 10");
-    ESP_LOGI(TAG, "  MOTOR REAR BACKWARD 5");
-    ESP_LOGI(TAG, "  MOTOR FRONT FORWARD 8");
-    ESP_LOGI(TAG, "  MOTOR FRONT STOP");
-    ESP_LOGI(TAG, "  MOTOR FRONT CALIB       <- Mostra tabela PWM");
-    ESP_LOGI(TAG, "  MOTOR REAR CALIB        <- Mostra tabela PWM");
-    ESP_LOGI(TAG, "  SYNC FORWARD 5          <- Todos os motores sincronizados!");
-    ESP_LOGI(TAG, "  SYNC STOP               <- Para tudo");
+    ESP_LOGI(TAG, "Exemplos e comandos antigos continuam válidos. A lógica de concorrência foi eliminada.");
     ESP_LOGI(TAG, "");
 
     // Tasks
+    // Prioridade do HUB (6) > Prioridade da Serial (5) e Sweep (5)
     xTaskCreate(serial_task, "serial_task", 4096, NULL, 5, NULL);
-    xTaskCreate(car_control_task, "car_control_task", 4096, NULL, 5, NULL);
+    xTaskCreate(control_hub_task, "control_hub_task", 4096, NULL, 6, NULL); // Task de controle centralizada
+
+    // car_control_task removida, sua lógica está no control_hub_task
 
     // Loop principal
     while (1) {
