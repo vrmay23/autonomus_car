@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS 
+        "hello_world_main.c"
+        "mecatronic.c"
+        "wifi_server.c"
+        "streaming.c"
+    INCLUDE_DIRS 
+        "."
+    PRIV_REQUIRES 
+        driver 
+        freertos 
+        esp_wifi 
+        nvs_flash 
+        esp_netif 
+        esp_event 
+        esp_http_server
+        esp_http_client
+        json
+)

@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GODAR - Controle Completo</title>
+    <style>
+        body { 
+            font-family: sans-serif; 
+            text-align: center; 
+            margin: 20px; 
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #00d4ff;
+            text-shadow: 0 0 10px #00d4ff;
+        }
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .controls { 
+            padding: 15px; 
+            border: 2px solid #00d4ff; 
+            border-radius: 12px; 
+            background: #2a2a2a;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+        }
+        .video-container {
+            grid-column: 1 / -1;
+            padding: 15px;
+            border: 2px solid #ff00d4;
+            border-radius: 12px;
+            background: #2a2a2a;
+            box-shadow: 0 0 20px rgba(255, 0, 212, 0.3);
+        }
+        #videoStream {
+            width: 100%;
+            max-width: 640px;
+            height: auto;
+            border-radius: 8px;
+            background: #000;
+        }
+        button { 
+            padding: 10px 20px; 
+            margin: 5px; 
+            font-size: 16px; 
+            cursor: pointer; 
+            border: none; 
+            border-radius: 8px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        button:active {
+            transform: scale(0.95);
+        }
+        .directional { 
+            display: grid; 
+            grid-template-areas: ". forward ." "left status right" ". backward ."; 
+            gap: 10px; 
+            margin-top: 15px; 
+        }
+        #BtnFrente { grid-area: forward; }
+        #BtnRe { grid-area: backward; }
+        #BtnEsquerda { grid-area: left; }
+        #BtnDireita { grid-area: right; }
+        #LabelStatus { 
+            grid-area: status; 
+            background-color: #333; 
+            padding: 10px; 
+            border-radius: 8px; 
+            font-weight: bold;
+            border: 2px solid #00d4ff;
+        }
+        .action-btns button { width: 150px; }
+        .turn-btns button { width: 80px; }
+        .fw-bw-btns button { width: 100%; }
+        .cam-btns button { width: 120px; margin: 5px; }
+        
+        /* Cores */
+        #BtnFrente, #BtnRe { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        #BtnAcelerar, #BtnReduzir { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
+        #BtnEsquerda, #BtnDireita { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: #000; }
+        #BtnFreiar { background: linear-gradient(135deg, #fa709a 0%, #fee140 100%); color: #000; }
+        
+        .cam-btns button { background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%); color: #000; }
+        .cam-btns button.active { background: linear-gradient(135deg, #ff6a00 0%, #ee0979 100%); color: #fff; }
+        
+        .sensor-info {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 15px;
+            font-size: 14px;
+        }
+        .sensor-box {
+            padding: 10px;
+            background: #333;
+            border-radius: 8px;
+            border: 2px solid #00ff00;
+            min-width: 100px;
+        }
+        .sensor-box.disconnected {
+            border-color: #ff0000;
+            opacity: 0.5;
+        }
+        
+        @media (max-width: 768px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚗 GODAR - Controle Completo</h1>
+        
+        <!-- Vídeo da Câmera -->
+        <div class="video-container">
+            <h2>📹 Câmera ESP32-CAM</h2>
+            <img id="videoStream" src="" alt="Aguardando stream...">
+            <div class="cam-btns">
+                <button id="BtnCameraToggle">Liga/Desliga Câmera</button>
+                <button id="BtnFlashToggle">Flash</button>
+                <button id="BtnBuzzerToggle">Buzzer</button>
+            </div>
+            <div class="sensor-info">
+                <div class="sensor-box" id="sensorFront">
+                    <strong>Sensor Frontal</strong><br>
+                    <span id="distFront">-- cm</span>
+                </div>
+                <div class="sensor-box" id="sensorRear">
+                    <strong>Sensor Traseiro</strong><br>
+                    <span id="distRear">-- cm</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-grid">
+            <!-- Controles de Direção -->
+            <div class="controls">
+                <h2>🎮 Direção e Status</h2>
+                <div class="directional">
+                    <button id="BtnFrente" class="fw-bw-btns">Frente</button>
+                    <div id="LabelStatus">Pronto (Vel: 0)</div>
+                    <button id="BtnRe" class="fw-bw-btns">Ré</button>
+                    <button id="BtnEsquerda" class="turn-btns">Esquerda</button>
+                    <button id="BtnDireita" class="turn-btns">Direita</button>
+                </div>
+            </div>
+
+            <!-- Controles de Velocidade -->
+            <div class="controls action-btns">
+                <h2>⚡ Aceleração/Freio</h2>
+                <button id="BtnAcelerar">Acelerar</button>
+                <button id="BtnReduzir">Reduzir</button>
+                <button id="BtnFreiar">Parar/Frear</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = "http://192.168.4.1/cmd?c=";
+        const CAM_IP = "192.168.4.2"; // IP do ESP32-CAM
+        const statusLabel = document.getElementById('LabelStatus');
+        const videoStream = document.getElementById('videoStream');
+        
+        // Estado de velocidade global
+        let currentSpeed = 2;
+        let currentDirection = "STOP"; 
+        const MAX_SPEED = 10;
+        const MIN_SPEED = 1;
+        
+        // Estados da câmera
+        let cameraOn = true;
+        let flashOn = false;
+        let buzzerOn = false;
+        
+        // Inicia stream de vídeo
+        videoStream.src = `http://${CAM_IP}:81/stream`;
+        
+        function updateStatusLabel() {
+            let statusText = "";
+            if (currentDirection === "FORWARD") {
+                statusText = `Frente (Vel: ${currentSpeed})`;
+            } else if (currentDirection === "BACKWARD") {
+                statusText = `Ré (Vel: ${currentSpeed})`;
+            } else {
+                statusText = "PARADO (Vel: 0)";
+            }
+            statusLabel.textContent = statusText;
+        }
+
+        function sendSyncCommand(direction, speed) {
+            let command = "";
+            if (direction === "STOP") {
+                command = "SYNC%20STOP";
+                currentSpeed = 0;
+                currentDirection = "STOP";
+            } else {
+                let actualSpeed = speed < MIN_SPEED ? MIN_SPEED : speed;
+                command = `SYNC%20${direction}%20${actualSpeed}`;
+                currentSpeed = actualSpeed;
+                currentDirection = direction;
+            }
+
+            fetch(BASE_URL + command)
+                .then(response => {
+                    if (response.ok) updateStatusLabel();
+                })
+                .catch(error => console.error('Erro:', error));
+        }
+        
+        function sendAngleCommand(command) {
+            fetch(BASE_URL + command).catch(error => console.error('Erro:', error));
+        }
+        
+        // Controles de movimento (invertidos conforme seu código)
+        document.getElementById('BtnFrente').addEventListener('click', () => {
+            const speed = currentDirection === "FORWARD" ? currentSpeed : (currentSpeed > 0 ? currentSpeed : 2);
+            sendSyncCommand("BACKWARD", speed);
+        });
+
+        document.getElementById('BtnRe').addEventListener('click', () => {
+            const speed = currentDirection === "BACKWARD" ? currentSpeed : (currentSpeed > 0 ? currentSpeed : 2);
+            sendSyncCommand("FORWARD", speed);
+        });
+
+        document.getElementById('BtnFreiar').addEventListener('click', () => {
+            sendSyncCommand("STOP", 0);
+        });
+        
+        document.getElementById('BtnAcelerar').addEventListener('click', () => {
+            if (currentDirection === "STOP") return;
+            let newSpeed = currentSpeed + 1;
+            if (newSpeed > MAX_SPEED) newSpeed = MAX_SPEED;
+            if (newSpeed !== currentSpeed) sendSyncCommand(currentDirection, newSpeed);
+        });
+
+        document.getElementById('BtnReduzir').addEventListener('click', () => {
+            if (currentDirection === "STOP") return;
+            let newSpeed = currentSpeed - 1;
+            if (newSpeed < MIN_SPEED) {
+                sendSyncCommand("STOP", 0); 
+            } else if (newSpeed !== currentSpeed) {
+                sendSyncCommand(currentDirection, newSpeed);
+            }
+        });
+
+        // Direção (invertidos conforme seu código)
+        const btnEsquerda = document.getElementById('BtnEsquerda');
+        btnEsquerda.addEventListener('mousedown', () => sendAngleCommand("45"));
+        btnEsquerda.addEventListener('mouseup', () => sendAngleCommand("0"));
+        btnEsquerda.addEventListener('touchstart', () => sendAngleCommand("45"));
+        btnEsquerda.addEventListener('touchend', () => sendAngleCommand("0"));
+
+        const btnDireita = document.getElementById('BtnDireita');
+        btnDireita.addEventListener('mousedown', () => sendAngleCommand("-45"));
+        btnDireita.addEventListener('mouseup', () => sendAngleCommand("0"));
+        btnDireita.addEventListener('touchstart', () => sendAngleCommand("-45"));
+        btnDireita.addEventListener('touchend', () => sendAngleCommand("0"));
+        
+        // Controles da câmera
+        document.getElementById('BtnCameraToggle').addEventListener('click', () => {
+            cameraOn = !cameraOn;
+            fetch(`http://192.168.4.1/cam/power`, {
+                method: 'POST',
+                body: cameraOn ? 'on' : 'off'
+            });
+            if (!cameraOn) {
+                videoStream.src = '';
+            } else {
+                videoStream.src = `http://${CAM_IP}:81/stream`;
+            }
+        });
+        
+        document.getElementById('BtnFlashToggle').addEventListener('click', function() {
+            flashOn = !flashOn;
+            this.classList.toggle('active', flashOn);
+            fetch(`http://192.168.4.1/cam/flash`, {
+                method: 'POST',
+                body: flashOn ? 'on' : 'off'
+            });
+        });
+        
+        document.getElementById('BtnBuzzerToggle').addEventListener('click', function() {
+            buzzerOn = !buzzerOn;
+            this.classList.toggle('active', buzzerOn);
+            fetch(`http://192.168.4.1/cam/buzzer`, {
+                method: 'POST',
+                body: buzzerOn ? 'on' : 'off'
+            });
+        });
+        
+        // Atualiza sensores a cada 500ms
+        setInterval(() => {
+            fetch(`http://192.168.4.1/cam/sensors`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.connected) {
+                        document.getElementById('distFront').textContent = data.front +

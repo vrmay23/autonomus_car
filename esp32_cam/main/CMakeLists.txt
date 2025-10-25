@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS 
+        "main.c"
+        "wifi_client.c"
+        "camera.c"
+        "sensors.c"
+    INCLUDE_DIRS 
+        "."
+    PRIV_REQUIRES 
+        driver
+        freertos
+        nvs_flash
+        esp_event
+        log
+        heap
+        json
+        esp_timer
+        esp_netif
+        esp_http_server
+        esp_http_client
+        espressif__esp32-camera
+        esp_wifi
+)
