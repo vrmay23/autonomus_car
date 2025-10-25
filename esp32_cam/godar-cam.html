@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-CAM SELFTEST</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin: 0 5px;
+        }
+        
+        .status-online {
+            background: #10b981;
+            color: white;
+        }
+        
+        .status-offline {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .section {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .section h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        #videoStream {
+            width: 100%;
+            max-width: 640px;
+            height: auto;
+            border-radius: 10px;
+            display: block;
+            margin: 0 auto 20px;
+            background: #000;
+            border: 3px solid #667eea;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        button.active {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+        }
+        
+        .sensors {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .sensor-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .sensor-box h3 {
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+        
+        .sensor-value {
+            font-size: 2.5em;
+            font-weight: bold;
+        }
+        
+        .sensor-box.disconnected {
+            background: #ef4444;
+            opacity: 0.6;
+        }
+        
+        .info-box {
+            background: #f0f9ff;
+            border-left: 4px solid #3b82f6;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .info-box strong {
+            color: #1e40af;
+        }
+        
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 1.8em;
+            }
+            
+            .container {
+                padding: 15px;
+            }
+            
+            button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚗 ESP32-CAM GODAR</h1>
+        <p class="subtitle">
+            Modo SELFTEST • 
+            <span class="status-badge status-online" id="statusBadge">Sistema Online</span>
+        </p>
+        
+        <div class="info-box">
+            <strong>📡 Conexão:</strong> SSID: <code>godar-cam</code> | IP: <code>192.168.4.2</code><br>
+            <strong>🎥 Stream:</strong> <code>http://192.168.4.2:81/stream</code><br>
+            <strong>🔧 API:</strong> <code>http://192.168.4.2/sensors</code>
+        </div>
+        
+        <!-- Seção de Vídeo -->
+        <div class="section">
+            <h2>📹 Stream de Vídeo ao Vivo</h2>
+            <img id="videoStream" src="http://192.168.4.2:81/stream" alt="Aguardando stream...">
+            <div class="controls">
+                <button id="btnFlash">💡 Flash OFF</button>
+                <button id="btnCamera">📷 Desligar Câmera</button>
+            </div>
+        </div>
+        
+        <!-- Seção de Sensores -->
+        <div class="section">
+            <h2>📡 Sensores Ultrassônicos</h2>
+            <div class="sensors">
+                <div class="sensor-box" id="sensorFront">
+                    <h3>🔵 SENSOR FRONTAL</h3>
+                    <div class="sensor-value" id="distFront">--</div>
+                    <div>centímetros</div>
+                </div>
+                <div class="sensor-box" id="sensorRear">
+                    <h3>🔴 SENSOR TRASEIRO</h3>
+                    <div class="sensor-value" id="distRear">--</div>
+                    <div>centímetros</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Seção de Buzzer -->
+        <div class="section">
+            <h2>🔊 Controle de Buzzer</h2>
+            <div class="controls">
+                <button id="btnBuzzer">🔇 Buzzer OFF</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const CAM_IP = "192.168.4.2";
+        let flashOn = false;
+        let buzzerOn = false;
+        let cameraOn = true;
+        
+        const videoStream = document.getElementById('videoStream');
+        const btnFlash = document.getElementById('btnFlash');
+        const btnBuzzer = document.getElementById('btnBuzzer');
+        const btnCamera = document.getElementById('btnCamera');
+        const statusBadge = document.getElementById('statusBadge');
+        
+        // Controle do Flash
+        btnFlash.addEventListener('click', () => {
+            flashOn = !flashOn;
+            fetch(`http://${CAM_IP}/flash`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({state: flashOn ? "on" : "off"})
+            })
+            .then(res => res.ok ? res : Promise.reject())
+            .then(() => {
+                btnFlash.textContent = flashOn ? '💡 Flash ON' : '💡 Flash OFF';
+                btnFlash.classList.toggle('active', flashOn);
+            })
+            .catch(() => alert('❌ Erro ao controlar flash'));
+        });
+        
+        // Controle do Buzzer
+        btnBuzzer.addEventListener('click', () => {
+            buzzerOn = !buzzerOn;
+            fetch(`http://${CAM_IP}/buzzer`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({state: buzzerOn ? "on" : "off"})
+            })
+            .then(res => res.ok ? res : Promise.reject())
+            .then(() => {
+                btnBuzzer.textContent = buzzerOn ? '🔊 Buzzer ON' : '🔇 Buzzer OFF';
+                btnBuzzer.classList.toggle('active', buzzerOn);
+            })
+            .catch(() => alert('❌ Erro ao controlar buzzer'));
+        });
+        
+        // Controle da Câmera
+        btnCamera.addEventListener('click', () => {
+            cameraOn = !cameraOn;
+            fetch(`http://${CAM_IP}/camera`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({state: cameraOn ? "on" : "off"})
+            })
+            .then(res => res.ok ? res : Promise.reject())
+            .then(() => {
+                btnCamera.textContent = cameraOn ? '📷 Desligar Câmera' : '📷 Ligar Câmera';
+                btnCamera.classList.toggle('active', !cameraOn);
+                
+                if (cameraOn) {
+                    videoStream.src = `http://${CAM_IP}:81/stream`;
+                } else {
+                    videoStream.src = '';
+                }
+            })
+            .catch(() => alert('❌ Erro ao controlar câmera'));
+        });
+        
+        // Atualiza sensores a cada 500ms
+        setInterval(() => {
+            fetch(`http://${CAM_IP}/sensors`)
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('distFront').textContent = data.front >= 0 ? data.front : '--';
+                    document.getElementById('distRear').textContent = data.rear >= 0 ? data.rear : '--';
+                    
+                    document.getElementById('sensorFront').classList.remove('disconnected');
+                    document.getElementById('sensorRear').classList.remove('disconnected');
+                    
+                    statusBadge.textContent = 'Sistema Online';
+                    statusBadge.className = 'status-badge status-online';
+                })
+                .catch(() => {
+                    document.getElementById('distFront').textContent = 'Offline';
+                    document.getElementById('distRear').textContent = 'Offline';
+                    document.getElementById('sensorFront').classList.add('disconnected');
+                    document.getElementById('sensorRear').classList.add('disconnected');
+                    
+                    statusBadge.textContent = 'Sistema Offline';
+                    statusBadge.className = 'status-badge status-offline';
+                });
+        }, 500);
+        
+        // Teste inicial ao carregar
+        console.log('🚀 Interface carregada! Testando conexão...');
+        fetch(`http://${CAM_IP}/sensors`)
+            .then(res => res.json())
+            .then(data => console.log('✅ Sensores:', data))
+            .catch(err => console.error('❌ Erro de conexão:', err));
+    </script>
+</body>
+</html>
